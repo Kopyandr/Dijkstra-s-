@@ -1,0 +1,270 @@
+import heapq
+import osmnx as ox
+import matplotlib as plt
+import json
+from itertools import combinations
+
+'''
+To change the method, starting location or the destination you need to set up params below such as:
+
+method='distance' or 'travel time' 
+location= 'town from the geographycal location' (defoult=Cheb)
+destination =  'town from the geographycal location' (defoult= Kynšperk nad ohří) everyone should visit atleast once
+
+
+
+To find the shortest distance between all nodes (cities, towns) it is recomended to set a limit of 
+the nodes as for all nodes in graphe the algorythm may take a long time to finish (defoult lim=4)
+'''
+
+#method= input("choose method ('travel time' or distance): ").strip().lower()
+location='Cheb'  #initial location 
+destination='Kynšperk nad Ohří' # destination  
+method='travel time' #method either 'distance' or 'travel time' 
+lim=4 #limit for calculate_combinations 
+
+G = ox.graph_from_place("Karlovarský kraj, Czechia", network_type="drive") #import road network as Multi-G 
+
+#convertion of the Multigraph to the dictionary 
+# Convert the maxspeed attribute to numeric and store it as 'speed_kph'
+for u, v, k, data in G.edges(keys=True, data=True):
+    try:
+        data['speed_kph'] = float(data.get('maxspeed', 50))
+    except Exception as e:
+        data['speed_kph'] = 50
+
+
+gdf_nodes, gdf_edges = ox.graph_to_gdfs(G) # Convert the graph to GeoDataFrames
+
+# Use Pandas to group the edges by 'u' and 'v'
+# and aggregate the attributes (e.g., take the minimum length and minimum speed).
+grouped = gdf_edges.groupby(['u', 'v']).agg({
+    'length': 'min',
+    'speed_kph': 'min'
+}).reset_index()
+
+# Now, build a nested dictionary from the grouped DataFrame.
+G_dict = {}
+for u, neighbors in G.adjacency():
+    u_int = int(u)  # u is int now 
+    G_dict[u_int] = {}
+    for v, edge_dict in neighbors.items():
+        v_int = int(v)  # v needs to be int 
+        lengths = [data.get('length', 1) for data in edge_dict.values()]
+        speeds = [data.get('speed_kph', 50) for data in edge_dict.values()]
+        length = int(round(min(lengths))) if lengths else 1
+        speed = int(round(min(speeds))) if speeds else 50 
+        G_dict[u_int][v_int] = {"length": length, "speed_kph": speed}
+
+
+#C = {node: [row['x'], row['y']] for node, row in gdf_nodes.iterrows()}
+for i, (node, nbrs) in enumerate(G_dict.items()):
+    #print(f"G Node {node}: {nbrs}")
+    if i >= 8:  
+        break
+    
+#### Dictionary of cities-> coodrinates-> nodes 
+tags = {"place": ["city", "town", "village", "hamlet"]}
+gdf_places = ox.features_from_place("Karlovarský kraj, Czechia", tags=tags) # Retrieve the features from OpenStreetMap for the given region.
+gdf_places = gdf_places.dropna(subset=["name"]) # Filter noname features 
+
+cities = {} # Create a dictionary that will map each city name to its nearest node in the graph G.
+
+
+for idx, row in gdf_places.iterrows(): # Iterate over the rows of the GeoDataFrame.
+    city_name = row["name"]
+    centroid = row.geometry.centroid
+    node_id = ox.distance.nearest_nodes(G, X=centroid.x, Y=centroid.y)
+    cities[city_name] = node_id
+
+
+
+def Dijkstra (G,start,end,method='distance'): #Dijstra function 
+    distances = {node: float('inf') for node in G} # Distances set to inf 
+    distances[start] = 0 # The start node distance=0 
+    predecessors = {node: None for node in G} # set initial perent nodes to None 
+    queue = [(0, start)] # Priority queue: chosing the closest node (dist optimazation)
+
+    while queue: 
+        current_distance, current_node= heapq.heappop(queue) #returns the distance, and the node while clearing the que  
+        # current_distance=0,current_node=start
+        if current_node==end: 
+            break
+        if current_distance > distances[current_node]: # is the current distance (0) > than the distances[current_node]->skip   
+            continue  
+        
+        for neighbor,properties in G[current_node].items(): #returns 1st (neigbor=2, weight=8)
+
+            if method=='travel time': #chosing the weight computation method 
+                new_distance=current_distance + (properties['length']/1000)/(properties['speed_kph']) # lenght(km)/velosityy(kph)
+            
+            else:
+                new_distance=current_distance+properties['length'] #plain distance 
+                
+            if new_distance < distances[neighbor]: 
+                distances[neighbor]=new_distance
+                predecessors[neighbor]=current_node 
+                heapq.heappush(queue,(new_distance,neighbor)) # que now = [(8,2)] 
+    return(distances, predecessors) 
+ 
+ 
+def reconstruct_path (predecessors, start,end): # the path reconstruction 
+    path=[] 
+    current=end # starting from the end 
+    while current is not None: 
+        path.append(current) 
+        if current==start:
+            break
+        current=predecessors[current] # set the current to the parent(predecesor) of the curent
+    path.reverse() # 
+    
+    if path[0]!= start: 
+        print('incorect path')
+        return[]
+    
+    return path
+
+
+def bellman_ford (G,start, method='distance'): 
+    num_nodes = len(G)
+    distances = {node: float('inf') for node in G} #set distances of nodes to inf 
+    distances[start] = 0 # The start node distance=0 
+    predecessors = {node: None for node in G} # set initial perent nodes to None 
+    
+    for i in range(num_nodes-1): # n - 1 iterations  
+        for current in G: #for eache node in the graph 
+            for neighbor, properties in G[current].items(): 
+                
+                if method=='travel time': #chosing the weight computation method 
+                    weight= (properties['length']/1000)/properties['speed_kph'] # lenght(km)/velosityy(kph)
+                else: 
+                    weight=properties['length']
+                
+                if distances[current]+weight<distances[neighbor]:
+                    distances[neighbor]=distances[current]+weight
+                    predecessors[neighbor]=current
+             
+    # Check for as negative cycle: 
+    for current in G: #
+        for neighbor, properties in G[current].items():
+            if method == 'travel time':
+                weight = (properties['length'] / 1000) / properties['speed_kph']
+            else:
+                weight = properties['length']
+            if distances[current] + weight < distances[neighbor]: # can the edge be relaxed ? 
+                raise ValueError("The graph contains a negative weight cycle") # no bueno 
+
+    return distances, predecessors
+
+
+def calculate_combinations(G, limit=None, method="distance"):
+    if limit is not None:
+        selected_cities = dict(list(cities.items())[:limit]) # only select first limit places 
+    else:
+        selected_cities = cities  # all 
+
+    city_names = list(selected_cities.keys())
+    results = {}  # Dictionary for resutls 
+
+    for city1, city2 in combinations(city_names, 2):# Generate all combinations of two cities
+        node1 = selected_cities[city1]
+        node2 = selected_cities[city2]
+
+        distances, predecessors = Dijkstra(G_dict, node1, node2, method)  # Call Dijkstra algorithm
+        route = reconstruct_path(predecessors, node1, node2)        # Reconstruct the path
+
+        # Use a string key instead of a tuple for JSON compatibility
+        results[f"({city1}, {city2})"] = {"distance": distances[node2], "route": route}
+    
+        print(f"{city1} to {city2}: distance = {distances[node2]}, route = {route}")
+        
+    with open("all_shortest_paths.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    
+    return results
+
+def kruskas(G, method='distance'):
+    
+    edges = []  # list to store edges as (weight, node, neighbour)
+    
+    for node, neighbors in G.items():
+        for neighbour, properties in neighbors.items():
+            if method == 'travel time':
+                weight = (properties['length'] / 1000) / properties['speed_kph']
+            else:
+                weight = properties['length']
+            if node < neighbour:
+                edges.append((weight, node, neighbour))
+    
+    edges.sort(key=lambda x: x[0])
+    
+    parent = {node: node for node in G}
+    rank = {node: 0 for node in G}
+    
+    def find(x):
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+    
+    def union(x, y):
+        root_x = find(x)
+        root_y = find(y)
+        if root_x == root_y:
+            return False
+        if rank[root_x] < rank[root_y]:
+            parent[root_x] = root_y
+        elif rank[root_x] > rank[root_y]:
+            parent[root_y] = root_x
+        else:
+            parent[root_y] = root_x
+            rank[root_x] += 1
+        return True
+    
+    mst = []
+    for weight, u, v in edges:
+        if union(u, v):
+            mst.append((u, v, weight))
+            
+    mst_dict = [{"u": u, "v": v, "weight": weight} for (u, v, weight) in mst]
+    with open("minimum_spanning_tree.json", "w", encoding="utf-8") as f:
+        json.dump(mst_dict, f, ensure_ascii=False, indent=2)
+
+    print("MST saved to minimum_spanning_tree.json")
+    return mst
+
+#method= input("choose method ('travel time' or distance): ").strip().lower()
+location='Cheb'  #initial location 
+destination='Kynšperk nad Ohří' # destination  
+method='travel time' #method either 'distance' or 'travel time' 
+lim=4 #limit for calculate_combinations
+
+lat_loc, lon_loc=ox.geocode(location) #get coordinates of the locations
+lat_des,lon_des=ox.geocode(destination)
+start=ox.distance.nearest_nodes(G, X=lon_loc, Y=lat_loc) # assign location to the nearest node 
+end=ox.distance.nearest_nodes(G, X=lon_des, Y=lat_des)  # destination set to the nearest node 
+
+#Shortest distance 
+distances, predecessors = Dijkstra (G_dict, start, end, method) #calling the djistra algoritm 
+route=reconstruct_path(predecessors,start,end) # getting the route from Djikstra or Bellman-Ford 
+
+#Shortest path between all nodes 
+results = calculate_combinations(G_dict, limit=lim, method='distance') # shortest distance between all "cities" 
+
+
+#Kruskas aldorytm
+mst_distance = kruskas(G_dict, method='distance') 
+print("MST saved to minimum_spanning_tree.json")
+
+#ploting the Djikstra result
+if method=='travel time':
+    print ("Shortest travel time from:", start, "to end node", end, ":", round(distances[end]*60,2), 'min')
+    fig, ax = ox.plot_graph_route(G, route, route_linewidth=2, node_size=0, route_color='b')
+    
+
+else:
+    print("Shortest distance from start node:", start, "to end node", end, ":", (distances[end]/1000),'km')
+    fig, ax = ox.plot_graph_route(G, route, route_linewidth=2, node_size=0, route_color='r')
+    
+#print(predecessors)
+#print("Route:", route)
+
